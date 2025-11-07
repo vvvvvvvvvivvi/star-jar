@@ -275,30 +275,30 @@ export default function StarJar({ onComplimentUnlocked }) {
   const [introIndex, setIntroIndex] = useState(0);
   const forewords = [
     {
-      title: 'Surprise:>',
+      title: 'oh:0',
       body:
         "",
       hint: "Press 'Next' to continue!",
     },
     {
-      title: "I've been hiding a secret from you...",
+      title: "You found this...",
       body:
-        "You've been asking me what I've been working on and I didn't want to tell you, but today is finally the day I reveal my deep dark secret to you...",
+        "you really shouldn't be seeing this... i made it for someone very important to me...",
     },
     {
-      title: 'So',
+      title: 'But since you are here...',
       body:
-        'you know I am bad with verbal expressions, and from you showering me with kind words, I know you like them too.',
+        'if you also have someone very dear to you that you just want to shower them with compliments...',
     },
     {
-      title: 'Star Jar Project',
+      title: 'I have something for you? Maybe?',
       body:
-        'I stored everything I like about you in stars. And you are free to unravel them and make me die of embarrassment bc u birthday today. You can make a wish to reveal a star whenever you like, and you can open and close the app without losing the stars you have gathered.',
+        'I have this star jar for you to play around! Write something down for a special person, or even better, for yourself!',
     },
     {
-      title: 'Happy birthday!',
+      title: 'Write your own',
       body:
-        'I hope you like this present and I hope you healthy, happy and big boi.',
+        'and I will save mine for my special boy :>',
     },
   ];
 
