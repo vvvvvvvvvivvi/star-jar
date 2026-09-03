@@ -1,0 +1,269 @@
+## #!/usr/bin/env python
+“””
+searchland_edge_test.py
+
+Works out WHY features on the periphery of the study area are missing, without
+downloading anything.
+
+For each buffer distance it sends the study area polygon to
+POST /planning_applications/search with perPage=1 and reads the `count`. That
+costs 0.25 credits per distance, so the default six-point sweep costs about
+1.50 credits total and returns no records.
+
+Read the result like this:
+
+count is flat across every distance
+The polygon is not the constraint. Whatever you think is missing is
+missing for another reason - most likely it is not in the collection,
+or you are comparing against a bbox pull rather than a polygon one.
+
+count jumps sharply between 0 m and 5-10 m
+Boundary precision. Datum transformation choice, coordinate rounding,
+or features sitting exactly on the line. Pin –transformation and use a
+small buffer.
+
+count climbs steadily out to 25-100 m
+Searchland is matching on the application’s recorded point, not its site
+outline. A site straddling your boundary is excluded because its point
+falls outside. This is vendor behaviour, not something you can fix in
+the request - but it is a legitimate trial finding.
+
+Standalone. Run in the ArcGIS Pro Python environment.
+
+```
+python searchland_edge_test.py
+python searchland_edge_test.py --distances 0,10,50,200
+```
+
+“””
+
+import argparse
+import json
+import os
+import sys
+import time
+
+import arcpy
+import requests
+
+CONFIG = {
+“base_url”:        “https://api.searchland.co.uk/v1”,
+“api_key”:         os.environ.get(“SEARCHLAND_API_KEY”, “”),
+“study_area_fc”:   r”C:\Users\LEEV\OneDrive\searchland-trial\Searchland.gdb\study_areas”,
+“name_field”:      “”,
+“study_area_name”: “”,
+“distances”:       “0,5,10,25,50,100”,
+“transformation”:  “”,
+“timeout”:         120,
+}
+
+WGS84 = None
+_AUTH = None
+_SPENT = 0.0
+
+def log(m):
+print(m, flush=True)
+
+def fail(m):
+log(”\nERROR: {}”.format(m))
+if _SPENT:
+log(“Credits spent: {:.2f}”.format(_SPENT))
+sys.exit(1)
+
+def auth_variants(key):
+return {“raw”:    ({“Authorization”: key}, {}),
+“bearer”: ({“Authorization”: “Bearer {}”.format(key)}, {}),
+“query”:  ({}, {“apiKey”: key})}
+
+def resolve_auth(cfg):
+global _AUTH
+if not cfg[“api_key”]:
+fail(“no API key. Set SEARCHLAND_API_KEY or pass –api-key.”)
+url = “{}/api_usage/get”.format(cfg[“base_url”].rstrip(”/”))
+for scheme in (“raw”, “bearer”, “query”):
+h, p = auth_variants(cfg[“api_key”])[scheme]
+try:
+if requests.get(url, headers=h, params=p, timeout=cfg[“timeout”]).status_code == 200:
+_AUTH = scheme
+log(”  auth scheme:  {} (verified on the free usage endpoint)”.format(scheme))
+return
+except requests.RequestException:
+pass
+fail(“could not authenticate against /api_usage/get”)
+
+def study_area_geojson(cfg, buffer_m):
+“”“Rebuild the polygon at a given buffer distance, in the source projected
+CRS so the buffer is in real metres, then project to WGS84.”””
+fc = cfg[“study_area_fc”]
+where = “”
+if cfg[“name_field”] and cfg[“study_area_name”]:
+where = “{} = ‘{}’”.format(arcpy.AddFieldDelimiters(fc, cfg[“name_field”]),
+str(cfg[“study_area_name”]).replace(”’”, “’’”))
+
+```
+lyr = arcpy.management.MakeFeatureLayer(fc, "edge_lyr_{}".format(int(time.time() * 1000)),
+                                        where)[0]
+src_sr = arcpy.Describe(fc).spatialReference
+ext = arcpy.Describe(lyr).extent
+
+source = lyr
+if buffer_m:
+    buf = r"memory\edge_buf"
+    if arcpy.Exists(buf):
+        arcpy.management.Delete(buf)
+    method = "PLANAR" if src_sr.type == "Projected" else "GEODESIC"
+    arcpy.analysis.Buffer(lyr, buf, "{} Meters".format(buffer_m),
+                          dissolve_option="ALL", method=method)
+    source = buf
+
+sa = r"memory\edge_wgs"
+if arcpy.Exists(sa):
+    arcpy.management.Delete(sa)
+if src_sr.factoryCode == 4326:
+    arcpy.management.CopyFeatures(source, sa)
+else:
+    avail = arcpy.ListTransformations(src_sr, WGS84, ext)
+    tr = cfg["transformation"] if cfg["transformation"] in avail else (
+        avail[0] if avail else "")
+    arcpy.management.Project(source, sa, WGS84, tr)
+
+union = None
+for (g,) in arcpy.da.SearchCursor(sa, ["SHAPE@"]):
+    union = g if union is None else union.union(g)
+if union is None:
+    fail("study area has no usable geometry")
+
+rings = []
+for part in union:
+    part_rings, current = [], []
+    for p in part:
+        if p is None:
+            if len(current) >= 3:
+                part_rings.append(current)
+            current = []
+        else:
+            current.append([p.X, p.Y])
+    if len(current) >= 3:
+        part_rings.append(current)
+    closed = []
+    for r in part_rings:
+        if r[0] != r[-1]:
+            r.append(r[0])
+        if len(r) >= 4:
+            closed.append(r)
+    if closed:
+        rings.append(closed)
+
+arcpy.management.Delete(lyr)
+if not rings:
+    fail("could not build a GeoJSON polygon")
+return {"type": "MultiPolygon", "coordinates": rings}
+```
+
+def probe_count(cfg, geometry):
+global _SPENT
+url = “{}/planning_applications/search”.format(cfg[“base_url”].rstrip(”/”))
+headers, params = auth_variants(cfg[“api_key”])[_AUTH]
+headers = dict(headers)
+headers[“Content-Type”] = “application/json”
+body = {“geometry”: geometry, “page”: 0, “perPage”: 1,
+“return_full_meta_data”: False}
+
+```
+r = requests.post(url, headers=headers, params=params, json=body, timeout=cfg["timeout"])
+if r.status_code >= 400:
+    fail("HTTP {} from search\n  body: {}".format(r.status_code, r.text[:400]))
+payload = r.json()
+_SPENT += float(payload.get("cost") or 0)
+return payload.get("count")
+```
+
+def run(cfg):
+global WGS84
+WGS84 = arcpy.SpatialReference(4326)
+arcpy.env.overwriteOutput = True
+
+```
+distances = [float(d.strip()) for d in cfg["distances"].split(",") if d.strip()]
+
+log("=" * 66)
+log("Searchland edge test - probe only, no records downloaded")
+log("=" * 66)
+log("  study area:   {}".format(cfg["study_area_fc"]))
+log("  distances:    {} m".format(", ".join(str(d) for d in distances)))
+log("  est. cost:    {:.2f} credits".format(0.25 * len(distances)))
+resolve_auth(cfg)
+
+log("\n  {:>10}  {:>10}  {:>10}".format("buffer (m)", "count", "delta"))
+log("  " + "-" * 34)
+
+results, previous = [], None
+for d in distances:
+    geometry = study_area_geojson(cfg, d)
+    count = probe_count(cfg, geometry)
+    delta = "" if previous is None else "{:+d}".format(count - previous)
+    log("  {:>10.0f}  {:>10}  {:>10}".format(d, count, delta))
+    results.append((d, count))
+    previous = count
+
+log("\n" + "=" * 66)
+base = results[0][1]
+final = results[-1][1]
+
+if final == base:
+    log("  FLAT. The polygon is not what is excluding those features.")
+    log("  Check what you are comparing against - a bbox pull will always")
+    log("  contain periphery features that a polygon search correctly omits.")
+else:
+    early = next((c for d, c in results if d and d <= 10), base)
+    if early - base > (final - base) * 0.5:
+        log("  Most of the gain arrives by 10 m. This is boundary precision -")
+        log("  transformation choice or features sitting on the line.")
+        log("  Pin --transformation and use a small --buffer-m.")
+    else:
+        log("  Count climbs steadily with distance. Searchland is almost certainly")
+        log("  matching on the application point, not the site outline. A site")
+        log("  straddling your boundary is excluded when its point falls outside.")
+        log("  Not fixable in the request - worth raising with the vendor.")
+    log("")
+    log("  {} extra records at {:.0f} m = {:.2f} credits to download".format(
+        final - base, results[-1][0], (final - base) * 0.25))
+
+log("\n  Credits spent on this test: {:.2f}".format(_SPENT))
+log("=" * 66)
+
+for tmp in (r"memory\edge_buf", r"memory\edge_wgs"):
+    if arcpy.Exists(tmp):
+        arcpy.management.Delete(tmp)
+```
+
+def parse_args():
+p = argparse.ArgumentParser(description=**doc**,
+formatter_class=argparse.RawDescriptionHelpFormatter)
+p.add_argument(”–base-url”, default=CONFIG[“base_url”])
+p.add_argument(”–api-key”, default=CONFIG[“api_key”])
+p.add_argument(”–study-area-fc”, default=CONFIG[“study_area_fc”])
+p.add_argument(”–name-field”, default=CONFIG[“name_field”])
+p.add_argument(”–study-area-name”, default=CONFIG[“study_area_name”])
+p.add_argument(”–distances”, default=CONFIG[“distances”],
+help=“comma-separated buffer distances in metres”)
+p.add_argument(”–transformation”, default=CONFIG[“transformation”])
+p.add_argument(”–timeout”, type=int, default=CONFIG[“timeout”])
+
+```
+a = p.parse_args()
+cfg = dict(CONFIG)
+cfg.update({"base_url": a.base_url, "api_key": a.api_key,
+            "study_area_fc": a.study_area_fc, "name_field": a.name_field,
+            "study_area_name": a.study_area_name, "distances": a.distances,
+            "transformation": a.transformation, "timeout": a.timeout})
+return cfg
+```
+
+if **name** == “**main**”:
+try:
+run(parse_args())
+except arcpy.ExecuteError:
+fail(“arcpy failed:\n{}”.format(arcpy.GetMessages(2)))
+except KeyboardInterrupt:
+fail(“cancelled by user”)
